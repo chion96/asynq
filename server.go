@@ -242,6 +242,13 @@ type Config struct {
 	// If unset or nil, the group aggregation feature will be disabled on the server.
 	GroupAggregator GroupAggregator
 
+	// GroupConfigProvider, if provided, is called to get aggregation config for each group during aggregation checks.
+	// This allows different groups or queues to have different aggregation behavior.
+	//
+	// If nil, or if the returned GroupConfig has zero values, the static GroupGracePeriod, GroupMaxDelay,
+	// and GroupMaxSize values are used as defaults.
+	GroupConfigProvider GroupConfigProvider
+
 	// JanitorInterval specifies the average interval of janitor checks for expired completed tasks.
 	//
 	// If unset or zero, default interval of 8 seconds is used.
@@ -273,6 +280,35 @@ type GroupAggregatorFunc func(group string, tasks []*Task) *Task
 func (fn GroupAggregatorFunc) Aggregate(group string, tasks []*Task) *Task {
 	return fn(group, tasks)
 }
+
+// GroupConfig holds the aggregation configuration for a group.
+type GroupConfig struct {
+	// GracePeriod specifies the amount of time the server will wait for an incoming task
+	// before aggregating the tasks in a group. If an incoming task is received within this period,
+	// the server will wait for another period of the same length, up to MaxDelay if specified.
+	//
+	// Zero value means no change from the configured default (GroupGracePeriod).
+	GracePeriod time.Duration
+
+	// MaxDelay specifies the maximum amount of time the server will wait for incoming tasks
+	// before aggregating the tasks in a group.
+	//
+	// Zero value means no change from the configured default (GroupMaxDelay).
+	MaxDelay time.Duration
+
+	// MaxSize specifies the maximum number of tasks that can be aggregated into a single task
+	// within a group. If MaxSize is reached, the server will aggregate the tasks into one immediately.
+	//
+	// Zero value means no change from the configured default (GroupMaxSize).
+	MaxSize int
+}
+
+// GroupConfigProvider is called to get the aggregation configuration for a given group and queue.
+// This allows different groups or queues to have different aggregation behavior.
+//
+// The function receives the group name and queue name, and returns a GroupConfig.
+// If any field in the returned GroupConfig is zero, the default value from the server Config is used.
+type GroupConfigProvider func(group, queue string) GroupConfig
 
 // An ErrorHandler handles an error occurred during task processing.
 type ErrorHandler interface {
@@ -594,13 +630,14 @@ func NewServerFromRedisClient(c redis.UniversalClient, cfg Config) *Server {
 		batchSize: janitorBatchSize,
 	})
 	aggregator := newAggregator(aggregatorParams{
-		logger:          logger,
-		broker:          rdb,
-		queues:          qnames,
-		gracePeriod:     groupGracePeriod,
-		maxDelay:        cfg.GroupMaxDelay,
-		maxSize:         cfg.GroupMaxSize,
-		groupAggregator: cfg.GroupAggregator,
+		logger:              logger,
+		broker:              rdb,
+		queues:              qnames,
+		gracePeriod:         groupGracePeriod,
+		maxDelay:            cfg.GroupMaxDelay,
+		maxSize:             cfg.GroupMaxSize,
+		groupAggregator:     cfg.GroupAggregator,
+		groupConfigProvider: cfg.GroupConfigProvider,
 	})
 	return &Server{
 		logger:           logger,

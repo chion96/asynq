@@ -26,13 +26,16 @@ type aggregator struct {
 	// list of queue names to check and aggregate.
 	queues []string
 
-	// Group configurations
+	// Default group configurations (used when provider returns zero values)
 	gracePeriod time.Duration
 	maxDelay    time.Duration
 	maxSize     int
 
 	// User provided group aggregator.
 	ga GroupAggregator
+
+	// User provided group config provider (optional).
+	gcp GroupConfigProvider
 
 	// interval used to check for aggregation
 	interval time.Duration
@@ -43,13 +46,14 @@ type aggregator struct {
 }
 
 type aggregatorParams struct {
-	logger          *log.Logger
-	broker          base.Broker
-	queues          []string
-	gracePeriod     time.Duration
-	maxDelay        time.Duration
-	maxSize         int
-	groupAggregator GroupAggregator
+	logger              *log.Logger
+	broker              base.Broker
+	queues              []string
+	gracePeriod         time.Duration
+	maxDelay            time.Duration
+	maxSize             int
+	groupAggregator     GroupAggregator
+	groupConfigProvider GroupConfigProvider
 }
 
 const (
@@ -76,6 +80,7 @@ func newAggregator(params aggregatorParams) *aggregator {
 		maxDelay:    params.maxDelay,
 		maxSize:     params.maxSize,
 		ga:          params.groupAggregator,
+		gcp:         params.groupConfigProvider,
 		sema:        make(chan struct{}, maxConcurrentAggregationChecks),
 		interval:    interval,
 	}
@@ -127,6 +132,28 @@ func (a *aggregator) exec(t time.Time) {
 	}
 }
 
+// groupConfig returns the aggregation config for the given group and queue.
+// It uses the GroupConfigProvider if set, falling back to defaults for zero values.
+func (a *aggregator) groupConfig(gname, qname string) (gracePeriod, maxDelay time.Duration, maxSize int) {
+	gracePeriod = a.gracePeriod
+	maxDelay = a.maxDelay
+	maxSize = a.maxSize
+
+	if a.gcp != nil {
+		cfg := a.gcp(gname, qname)
+		if cfg.GracePeriod > 0 {
+			gracePeriod = cfg.GracePeriod
+		}
+		if cfg.MaxDelay > 0 {
+			maxDelay = cfg.MaxDelay
+		}
+		if cfg.MaxSize > 0 {
+			maxSize = cfg.MaxSize
+		}
+	}
+	return
+}
+
 func (a *aggregator) aggregate(t time.Time) {
 	defer func() { <-a.sema /* release token */ }()
 	for _, qname := range a.queues {
@@ -136,8 +163,9 @@ func (a *aggregator) aggregate(t time.Time) {
 			continue
 		}
 		for _, gname := range groups {
+			gracePeriod, maxDelay, maxSize := a.groupConfig(gname, qname)
 			aggregationSetID, err := a.broker.AggregationCheck(
-				qname, gname, t, a.gracePeriod, a.maxDelay, a.maxSize)
+				qname, gname, t, gracePeriod, maxDelay, maxSize)
 			if err != nil {
 				a.logger.Errorf("Failed to run aggregation check: queue=%q group=%q", qname, gname)
 				continue
